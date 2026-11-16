@@ -104,6 +104,9 @@ def validate_config(data: Any) -> None:
     types = data.get("componentsTypes")
     if not isinstance(types, dict):
         fail('Missing "componentsTypes" object.')
+    generation = data.get("generation")
+    if generation is not None and str(generation).upper() not in ("G2", "G3"):
+        fail('"generation" must be "G2" or "G3".')
 
     for type_name, components in types.items():
         if type_name not in KNOWN_COMPONENT_TYPES:

@@ -40,6 +40,7 @@ from .client import (
     celsius_to_preset_byte,
     celsius_to_short,
     decode_sensor,
+    G3_UNSUPPORTED_FUNCTIONS,
     display_line_length,
     display_targets,
     wrap_display_text,
@@ -104,6 +105,10 @@ class TeletaskHub:
         self.port = port
         self.central_id = central_id
         self.config = config
+        # Central generation: "G2" (MICROS+/NANOS/PICOS) is the default;
+        # "G3" (PALAS/DOMUS, PROSOFT 5) reads sensors as 4-byte floats and
+        # subscribes per device (0x22/0x23). Set "generation" in config.json.
+        self.g3 = str(config.get("generation", "G2")).upper() == "G3"
         self._client = TeletaskClient(host, port, self._on_event, self._on_disconnect)
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_web: Any = None
@@ -248,8 +253,20 @@ class TeletaskHub:
             fn = function_map.get(type_name)
             if fn is None:
                 continue
+            if self.g3 and fn in G3_UNSUPPORTED_FUNCTIONS:
+                _LOGGER.warning(
+                    "%s is not part of the DoIP API of G3 centrals; %d component(s) skipped",
+                    type_name, len(components),
+                )
+                continue
             for comp in components:
                 number = comp["number"]
+                if self.g3 and str(comp.get("type") or "").upper() == "TEMPERATURECONTROL":
+                    _LOGGER.warning(
+                        "SENSOR %s: climate zones (TEMPERATURECONTROL) are not supported "
+                        "on G3 centrals yet; skipped", number,
+                    )
+                    continue
                 key = (int(fn), number)
                 self._components[key] = {
                     "function":      int(fn),
@@ -282,6 +299,40 @@ class TeletaskHub:
         )
         # Step 1: Subscribe per function type (LOG covers all components of that type).
         # The central also sends a "welcome" event with current state for each component.
+        if self.g3:
+            await self._subscribe_all_g3()
+        else:
+            await self._subscribe_all_legacy()
+        # Step 2: GROUPGET per component to guarantee an immediate state reply.
+        for fn, number in self._components:
+            if not self.can_request_state(fn):
+                continue
+            _LOGGER.debug("GROUPGET fn=%d num=%d", fn, number)
+            await self._client.groupget(fn, number)
+            await asyncio.sleep(0.02)
+        _LOGGER.debug("Waiting for central to deliver all subscription replies…")
+        await asyncio.sleep(1.5)
+        _LOGGER.debug("Subscription complete. Cached states: %s", self._component_states)
+
+    async def _subscribe_all_g3(self) -> None:
+        """G3: one 0x22/0x23 subscription per function type, listing its devices."""
+        by_function: dict[int, list[int]] = {}
+        for fn, number in self._components:
+            if fn in WRITE_ONLY_FUNCTIONS:
+                continue
+            if fn in REPORT_ONLY_FUNCTIONS:
+                # Badge reports: subscription on device 202, number 1.
+                number = 1
+            by_function.setdefault(fn, [])
+            if number not in by_function[fn]:
+                by_function[fn].append(number)
+        for fn, numbers in by_function.items():
+            _LOGGER.debug("SUBSCRIBE fn=%d numbers=%s", fn, numbers)
+            await self._client.subscribe_devices(fn, sorted(numbers))
+            await asyncio.sleep(0.02)
+
+    async def _subscribe_all_legacy(self) -> None:
+        """G2: LOG (0x03) per function type, as before."""
         seen: set[int] = set()
         for fn, number in self._components:
             if fn in WRITE_ONLY_FUNCTIONS or fn in seen:
@@ -295,16 +346,6 @@ class TeletaskHub:
             _LOGGER.debug("LOG subscribe fn=%d", fn)
             await self._client.log_subscribe(fn)
             await asyncio.sleep(0.02)
-        # Step 2: GROUPGET per component to guarantee an immediate state reply.
-        for fn, number in self._components:
-            if not self.can_request_state(fn):
-                continue
-            _LOGGER.debug("GROUPGET fn=%d num=%d", fn, number)
-            await self._client.groupget(fn, number)
-            await asyncio.sleep(0.02)
-        _LOGGER.debug("Waiting for central to deliver all subscription replies…")
-        await asyncio.sleep(1.5)
-        _LOGGER.debug("Subscription complete. Cached states: %s", self._component_states)
 
     # ------------------------------------------------------------------
     # Event / disconnect callbacks (called from client)
@@ -391,7 +432,9 @@ class TeletaskHub:
             # The report layout is the same for every sensor zone; how its
             # values convert depends on the sensor type in config.json.
             config = self._components[key].get("config", {})
-            decoded = decode_sensor(config.get("type", "TEMPERATURE"), event.raw, config)
+            decoded = decode_sensor(
+                config.get("type", "TEMPERATURE"), event.raw, config, g3=self.g3
+            )
             if decoded is not None:
                 event.state = decoded
         prev = self._component_states.get(key)
