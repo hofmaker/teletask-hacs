@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
@@ -77,6 +79,12 @@ TYPE_FUNCTIONS: dict[str, FunctionCode] = {
 
 # Functions the central can't be asked about (no LOG / GET).
 WRITE_ONLY_FUNCTIONS = frozenset({FunctionCode.DISPLAYMESSAGE})
+# Functions that are not part of the 2026 DoIP API (PROSOFT 5 / G3 centrals).
+G3_UNSUPPORTED_FUNCTIONS = frozenset({FunctionCode.INPUT, FunctionCode.DISPLAYMESSAGE})
+# Largest number of devices put in one 0x23 frame (frame length is one byte).
+SUBSCRIBE_GROUP_MAX = 100
+# Temperature sensors report Kelvin on G3: float - 273 = degrees Celsius.
+G3_TEMPERATURE_OFFSET = 273.0
 # Functions that only report through their own subscription, never on GET.
 REPORT_ONLY_FUNCTIONS = frozenset({FunctionCode.ACCESS})
 
@@ -99,6 +107,7 @@ CMD_KEEP_ALIVE      = 0x0B  # must be sent immediately after TCP connect
 CMD_EVENT           = 0x10  # command byte used in all frames sent BY the central
 CMD_ACCESS_REPORT   = 0x14  # DoIP: badge access attempt
 CMD_SUBSCRIBE       = 0x22  # DoIP: per-device subscription
+CMD_SUBSCRIBE_GROUP = 0x23  # DoIP: subscription for a group of devices of one type
 
 STATE_OFF    = 0
 STATE_ON     = 255
@@ -212,12 +221,56 @@ _ANALOG_RANGES = {
 }
 
 
-def decode_sensor(sensor_type: str, data: bytes, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def decode_float(data: bytes, offset: int = 0) -> float | None:
+    """Read a big-endian IEEE-754 32-bit float (G3 / PROSOFT 5 sensor value).
+
+    Returns None when there are fewer than 4 bytes or the value is not a finite
+    number (NaN or infinity).
+    """
+    chunk = data[offset:offset + 4]
+    if len(chunk) < 4:
+        return None
+    value = struct.unpack(">f", chunk)[0]
+    return value if math.isfinite(value) else None
+
+
+def decode_sensor_g3(sensor_type: str, data: bytes) -> dict[str, Any] | None:
+    """Decode a SENSOR report from a G3 central (DoIP API 2026).
+
+    The four state bytes are one big-endian float. Temperatures are sent as
+    Kelvin (float - 273 = degrees Celsius); every other sensor type reports its
+    value directly (lux, % RH, W, kWh, V, ...).
+
+    TEMPERATURECONTROL (climate zones) is not decoded here: the API describes
+    their values as floats in degrees Celsius but does not say whether the 273
+    offset applies, so no value is made up.
+    """
+    sensor_type = (sensor_type or "TEMPERATURE").upper()
+    if sensor_type == "TEMPERATURECONTROL":
+        return None
+    raw = decode_float(data)
+    if raw is None:
+        return {"state": None, "value": None}
+    if sensor_type == "TEMPERATURE":
+        value = round(raw - G3_TEMPERATURE_OFFSET, 1)
+    elif sensor_type == "PULSECOUNTER":
+        value = round(raw)
+    else:
+        value = round(raw, 2)
+    return {"state": value, "value": value}
+
+
+def decode_sensor(sensor_type: str, data: bytes, config: dict[str, Any] | None = None, *, g3: bool = False) -> dict[str, Any] | None:
     """Decode a SENSOR report according to the sensor type in config.json.
+
+    With ``g3=True`` the report is read the PROSOFT 5 way (4-byte float); the
+    default is the G2 layout (2-byte values).
 
     The central reports every sensor zone in the same layout; only the
     conversion of the 2-byte values depends on the kind of sensor.
     """
+    if g3:
+        return decode_sensor_g3(sensor_type, data)
     config = config or {}
     sensor_type = (sensor_type or "TEMPERATURE").upper()
     raw = _short(data, 0)
@@ -476,6 +529,23 @@ class TeletaskClient:
             (number >> 8) & 0xFF, number & 0xFF, STATE_ON,
         ])))
 
+    async def subscribe_devices(self, function: int, numbers: list[int]) -> None:
+        """DoIP subscription for several devices of one type (0x23).
+
+        Sent in chunks so a frame never exceeds the one-byte length field. A single
+        device is sent as 0x22.
+        """
+        for start in range(0, len(numbers), SUBSCRIBE_GROUP_MAX):
+            chunk = numbers[start:start + SUBSCRIBE_GROUP_MAX]
+            if len(chunk) == 1:
+                await self.subscribe_device(function, chunk[0])
+                continue
+            payload = bytes([CMD_SUBSCRIBE_GROUP, self._central_id, function])
+            for number in chunk:
+                payload += bytes([(number >> 8) & 0xFF, number & 0xFF])
+            payload += bytes([STATE_ON])
+            await self._send(self._frame(payload))
+
     async def get_state(self, function: int, number: int) -> None:
         await self._send(self._build_get(function, number))
 
@@ -563,6 +633,7 @@ class TeletaskClient:
             CMD_GROUPGET: "GROUPGET", CMD_KEEP_ALIVE: "KEEP_ALIVE",
             CMD_EVENT: "EVENT", CMD_ACK: "ACK",
             CMD_DISPLAY_MESSAGE: "DISPLAYMSG", CMD_SUBSCRIBE: "SUBSCRIBE",
+            CMD_SUBSCRIBE_GROUP: "SUBSCRIBE_GROUP",
             CMD_ACCESS_REPORT: "ACCESS",
         }.get(cmd, f"0x{cmd:02X}")
 
