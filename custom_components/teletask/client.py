@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import logging
 import math
 import struct
@@ -440,10 +441,16 @@ class TeletaskClient:
         disconnect_callback: Callable[[], None] | None = None,
         central_id: int = 1,
         send_checksum: bool = True,
+        send_gap: float = 0.0,
     ) -> None:
         # G3 centrals (PROSOFT 5) no longer want the trailing checksum byte on
         # frames we send; with it they stay silent and close the connection.
         self._send_checksum = send_checksum
+        # G3 centrals drop frames that arrive close together (observed on a Palas:
+        # keep-alive + subscribe + state request within 20 ms gave 2 ACKs and no
+        # reports). With a gap every frame is sent alone and the next one waits.
+        self._send_gap = send_gap
+        self._send_lock = asyncio.Lock()
         self.host = host
         self.port = port
         self._central_id = central_id
@@ -467,6 +474,12 @@ class TeletaskClient:
                 asyncio.open_connection(self.host, self.port),
                 timeout=10,
             )
+            sock = self._writer.get_extra_info("socket")
+            if sock is not None:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
             self._connected = True
             _LOGGER.info("Connected to Teletask central at %s:%s", self.host, self.port)
             # Send the mandatory handshake before the central times out and closes.
@@ -670,13 +683,18 @@ class TeletaskClient:
         if not self._connected or self._writer is None:
             _LOGGER.warning("Cannot send: not connected")
             return
-        _LOGGER.debug("TX %-10s  raw: %s", self._describe_tx(data), data.hex(" "))
-        try:
-            self._writer.write(data)
-            await self._writer.drain()
-        except (OSError, ConnectionResetError) as exc:
-            _LOGGER.error("Send failed: %s", exc)
-            self._handle_disconnect()
+        async with self._send_lock:
+            if not self._connected or self._writer is None:
+                return
+            _LOGGER.debug("TX %-10s  raw: %s", self._describe_tx(data), data.hex(" "))
+            try:
+                self._writer.write(data)
+                await self._writer.drain()
+                if self._send_gap:
+                    await asyncio.sleep(self._send_gap)
+            except (OSError, ConnectionResetError) as exc:
+                _LOGGER.error("Send failed: %s", exc)
+                self._handle_disconnect()
 
     # ------------------------------------------------------------------
     # Receiving

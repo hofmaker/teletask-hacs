@@ -110,7 +110,8 @@ class TeletaskHub:
         # subscribes per device (0x22/0x23). Set "generation" in config.json.
         self.g3 = str(config.get("generation", "G2")).upper() == "G3"
         self._client = TeletaskClient(
-            host, port, self._on_event, self._on_disconnect, send_checksum=not self.g3
+            host, port, self._on_event, self._on_disconnect, send_checksum=not self.g3,
+            send_gap=0.15 if self.g3 else 0.0,
         )
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_web: Any = None

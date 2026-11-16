@@ -226,3 +226,37 @@ def test_unknown_reply_from_palas_is_consumed_without_event():
     event, used = client._parse_frame(buf)
     assert event is None
     assert used == 5
+
+
+def test_g3_frames_are_sent_one_by_one_with_a_gap():
+    chunks: list[tuple[float, bytes]] = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        async def handle(reader, writer):
+            while True:
+                data = await reader.read(100)
+                if not data:
+                    break
+                chunks.append((loop.time(), data))
+                writer.write(b"\x0a")
+                await writer.drain()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        client = TeletaskClient("127.0.0.1", port, lambda _: None, send_checksum=False, send_gap=0.05)
+        await client.connect()
+        await client.subscribe_devices(2, [82])
+        await client.groupget(2, 82)
+        await asyncio.sleep(0.2)
+        await client.disconnect()
+        server.close()
+
+    asyncio.run(scenario())
+    assert [c[1] for c in chunks] == [
+        bytes([0x02, 0x03, 0x0B]),
+        bytes([0x02, 0x08, 0x22, 0x01, 0x02, 0x00, 0x52, 0xFF]),
+        bytes([0x02, 0x07, 0x09, 0x01, 0x02, 0x00, 0x52]),
+    ]
+    assert all(b[0] - a[0] >= 0.04 for a, b in zip(chunks, chunks[1:]))
