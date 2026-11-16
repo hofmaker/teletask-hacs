@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **G3 centrals (PALAS / DOMUS, PROSOFT 5).** New optional `"generation": "G3"` in
+  `config.json`. Sensors are decoded as big-endian 32-bit floats (temperature is
+  Kelvin, minus 273), components are subscribed with `0x22` / `0x23` instead of the
+  deprecated `0x03`, and `INPUT`, `DISPLAYMESSAGE` and `TEMPERATURECONTROL` are
+  skipped with a warning. Not yet tested against a real PALAS. Default is `G2`,
+  so existing setups behave exactly as before.
+
 ## [1.8.1] — 2026-11-14
 
 ### Fixed

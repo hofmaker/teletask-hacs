@@ -186,7 +186,27 @@ The file has one list of components per component type.
 }
 ```
 
-**`type`** — your central unit model: `MICROS_PLUS`, `NANOS`, or `PICOS`. Informational only.
+**`type`** — your central unit model: `MICROS_PLUS`, `NANOS`, `PICOS`, `PALAS` or `DOMUS`. Informational only.
+
+**`generation`** — optional, `"G2"` (default) or `"G3"`. Set `"G3"` for a PALAS or DOMUS
+central running PROSOFT 5 (DoIP API 2026). It changes three things:
+
+- Sensors are read as one big-endian 32-bit float. Temperatures are Kelvin, so the value
+  is the float minus 273; every other sensor type (light, humidity, power, ...) reports its
+  value directly. G2 centrals send 2-byte values, which a G3 central does not.
+- Components are subscribed per device (command `0x22`, or `0x23` for several devices),
+  instead of the legacy per-type `LOG` command (`0x03`), which the 2026 API calls deprecated.
+- `INPUT` and `DISPLAYMESSAGE` components, and `TEMPERATURECONTROL` sensors, are skipped
+  with a warning. The first two are not part of the 2026 DoIP API. Climate zones report
+  floats in degrees Celsius, but the API does not say whether the 273 offset applies.
+
+```json
+{
+  "type": "PALAS",
+  "generation": "G3",
+  "componentsTypes": { "RELAY": [ ... ] }
+}
+```
 
 Every entry inside a component list shares these common fields:
 
