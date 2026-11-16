@@ -192,3 +192,37 @@ def test_large_groups_are_split_to_fit_the_length_byte():
 
 def test_unsupported_functions_on_g3():
     assert G3_UNSUPPORTED_FUNCTIONS == {FunctionCode.INPUT, FunctionCode.DISPLAYMESSAGE}
+
+
+# ---------------------------------------------------------------------------
+# Frames without checksum (G3 centrals)
+# ---------------------------------------------------------------------------
+
+def _client_no_checksum() -> TeletaskClient:
+    client = TeletaskClient("localhost", 55957, lambda _: None, send_checksum=False)
+    client._central_id = 1
+    return client
+
+
+def test_g3_keep_alive_is_exactly_the_documented_three_bytes():
+    assert _client_no_checksum()._build_keep_alive() == bytes([0x02, 0x03, 0x0B])
+
+
+def test_g3_state_request_has_no_trailing_checksum():
+    frame = _client_no_checksum()._frame(bytes([0x06, 0x01, 0x02, 0x00, 0x52]))
+    assert frame == bytes([0x02, 0x07, 0x06, 0x01, 0x02, 0x00, 0x52])
+    assert frame[1] == len(frame)
+
+
+def test_default_client_still_appends_checksum():
+    frame = _client()._build_keep_alive()
+    assert frame == bytes([0x02, 0x03, 0x0B, 0x10])
+
+
+def test_unknown_reply_from_palas_is_consumed_without_event():
+    # Observed on a real Palas (serial 721002404): reply 0x0E to any request.
+    client = _client()
+    buf = bytearray([0x02, 0x04, 0x0E, 0x00, 0x14])
+    event, used = client._parse_frame(buf)
+    assert event is None
+    assert used == 5

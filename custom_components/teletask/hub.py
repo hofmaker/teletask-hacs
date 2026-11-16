@@ -109,7 +109,9 @@ class TeletaskHub:
         # "G3" (PALAS/DOMUS, PROSOFT 5) reads sensors as 4-byte floats and
         # subscribes per device (0x22/0x23). Set "generation" in config.json.
         self.g3 = str(config.get("generation", "G2")).upper() == "G3"
-        self._client = TeletaskClient(host, port, self._on_event, self._on_disconnect)
+        self._client = TeletaskClient(
+            host, port, self._on_event, self._on_disconnect, send_checksum=not self.g3
+        )
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_web: Any = None
         self._components: dict[tuple[int, int], dict] = {}

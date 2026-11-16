@@ -439,7 +439,11 @@ class TeletaskClient:
         event_callback: Callable[[TeletaskEvent], None],
         disconnect_callback: Callable[[], None] | None = None,
         central_id: int = 1,
+        send_checksum: bool = True,
     ) -> None:
+        # G3 centrals (PROSOFT 5) no longer want the trailing checksum byte on
+        # frames we send; with it they stay silent and close the connection.
+        self._send_checksum = send_checksum
         self.host = host
         self.port = port
         self._central_id = central_id
@@ -613,12 +617,13 @@ class TeletaskClient:
             payload += bytes([(n >> 8) & 0xFF, n & 0xFF])
         return self._frame(payload)
 
-    @staticmethod
-    def _frame(payload: bytes) -> bytes:
+    def _frame(self, payload: bytes) -> bytes:
         # LENGTH includes the STX and LENGTH bytes themselves but NOT the checksum.
         # So: LENGTH = len(payload) + 2 (for STX + LENGTH byte).
         length = len(payload) + 2
         msg = bytes([TELETASK_STX, length]) + payload
+        if not self._send_checksum:
+            return msg
         checksum = sum(msg) & 0xFF
         return msg + bytes([checksum])
 
